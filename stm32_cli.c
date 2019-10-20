@@ -17,7 +17,8 @@
 static UART_HandleTypeDef* cliHandler = NULL;
 
 #if (configBSP_CLI_ENABLE_TASK == 1)
-osMessageQId cliQueueHandle;
+static osMessageQId cliQueueID;
+static osThreadId cliTaskID;
 static void BSP_CLI_Task(void * argument);
 #endif
 
@@ -52,24 +53,31 @@ uint8_t BSP_CLI_Init(UART_HandleTypeDef* pxUARTHandler)
 		}
 
 #if (configBSP_CLI_ENABLE_TASK == 1)
-		if( cliQueueHandle == NULL )
-		{
-			/* Create the queue used to pass pointers to strings to the logging task. */
-			cliQueueHandle = xQueueCreate( BSP_CLI_QUEUE_LEN, sizeof( char ** ) );
 
-			if( cliQueueHandle != NULL )
-			{
-				if( xTaskCreate( BSP_CLI_Task, "CLI", configMINIMAL_STACK_SIZE * 4, NULL, 0, NULL ) == pdPASS )
-				{
-					xReturn = 1;
-				}
-				else
-				{
-					/* Could not create the task, so delete the queue again. */
-					vQueueDelete( cliQueueHandle );
-				}
-			}
+	    if (cliQueueID == NULL)
+		{
+			/* Create Queue */
+			osMessageQDef(CLI_Queue, BSP_CLI_QUEUE_LEN, char*);
+			cliQueueID = osMessageCreate (osMessageQ(CLI_Queue), NULL);
 		}
+
+	    if (cliTaskID == NULL)
+	    {
+	    	/* Create Task */
+			osThreadDef(CLI_Task, BSP_CLI_Task, osPriorityNormal, 0, configMINIMAL_STACK_SIZE);
+			cliTaskID = osThreadCreate(osThread(CLI_Task), NULL);
+	    }
+
+	    if (cliTaskID != NULL)
+	    {
+	    	xReturn = 1;
+	    }
+	    else
+	    {
+			/* Could not create the task, so delete the queue again. */
+	    	osMessageDelete( cliQueueID );
+	    }
+
 #else
 		xReturn = 1;
 #endif
@@ -94,10 +102,10 @@ uint16_t BSP_CLI_Printf(const char * fmt, ...)
 {
   size_t xLength = 0;
   va_list args;
-  char * pcPrintString = NULL;
+  void * pcPrintString = NULL;
 
   /* Allocate a buffer to hold the log message. */
-  pcPrintString = (char*)pvPortMalloc(BSP_CLI_BUFFER_LEN);
+  pcPrintString = pvPortMalloc(BSP_CLI_BUFFER_LEN);
 
   if(pcPrintString != NULL)
   {
@@ -110,16 +118,16 @@ uint16_t BSP_CLI_Printf(const char * fmt, ...)
     if(xLength > 0)
     {
         /* Send the string to the logging task for IO. */
-        if(xQueueSend(cliQueueHandle, &pcPrintString, 0) != pdPASS)
-        {
+    	if (osMessagePut(cliQueueID, (uint32_t)pcPrintString, osWaitForever) != osOK)
+    	{
             /* The buffer was not sent so must be freed again. */
-            vPortFree( ( void * ) pcPrintString );
+            vPortFree(pcPrintString );
         }
     }
     else
     {
       /* The buffer was not sent, so it must be freed. */
-      vPortFree((void*)pcPrintString);
+      vPortFree(pcPrintString);
     }
   }
 
@@ -146,16 +154,24 @@ uint16_t BSP_CLI_Printf(const char* fmt, ...)
 
 static void BSP_CLI_Task(void * argument)
 {
-	char * pcReceivedString = NULL;
+	uint32_t PreviousWakeTime;
+	osEvent event;
+
+	/* Initialize the PreviousWakeTime variable with the current time. */
+	PreviousWakeTime = osKernelSysTick();
 
 	/* Infinite loop */
 	for(;;)
 	{
-		if(xQueueReceive(cliQueueHandle, &pcReceivedString, 0) == pdPASS)
+		/* Get the message from the queue */
+		event = osMessageGet(cliQueueID, osWaitForever);
+		if (event.status == osEventMessage)
 		{
-			BSP_CLI_Write(pcReceivedString, strlen(pcReceivedString));
-			vPortFree((void*)pcReceivedString);
+			BSP_CLI_Write((char*)event.value.v, strlen((char*)event.value.v));
+			vPortFree((void*)event.value.v);
 		}
+
+		osDelayUntil( &PreviousWakeTime, 10);
 	}
 }
 
